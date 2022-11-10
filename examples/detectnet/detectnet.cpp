@@ -22,11 +22,11 @@
 
 #include "videoSource.h"
 #include "videoOutput.h"
-
+#include <stdio.h>
 #include "detectNet.h"
 
 #include <signal.h>
-
+#include <time.h>
 
 #ifdef HEADLESS
 	#define IS_HEADLESS() "headless"	// run without display
@@ -66,12 +66,24 @@ int usage()
 
 int main( int argc, char** argv )
 {
+    int cfreq, gfreq, t = 0, cnt = 0;
+    int gavailable_freq[15] = {114750000, 204000000, 306000000, 408000000, 510000000, 599250000, 701250000, 803250000, 854250000, 905250000, 956250000, 1007250000, 1058250000, 1109250000};
+
+	FILE *fp = fopen("/home/uav/Desktop/write.txt","a+");	
+	FILE *fp2 = fopen("/home/uav/Desktop/test.txt","r");	
+    FILE *txt = fopen("/home/uav/code/GPS/master_thesis/schedtil_in_60s/detectnet.txt","a+");
+/*    FILE *cfq = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq","r");
+    FILE *gfq = fopen("/sys/devices/17000000.gv11b/devfreq/17000000.gv11b/cur_freq","r");
+    fscanf(cfq, "%d", &cfreq);
+    fscanf(gfq, "%d", &gfreq);*/
+	float lat , longit, sum_x = 0, sum_y = 0;		
 	/*
 	 * parse command line
 	 */
 	commandLine cmdLine(argc, argv, IS_HEADLESS());
 
-	if( cmdLine.GetFlag("help") )
+
+    if( cmdLine.GetFlag("help") )
 		return usage();
 
 
@@ -116,13 +128,28 @@ int main( int argc, char** argv )
 
 	// parse overlay flags
 	const uint32_t overlayFlags = detectNet::OverlayFlagsFromStr(cmdLine.GetString("overlay", "box,labels,conf"));
-	
 
+    time_t endwait, test_sec;
+    time_t stop_sec = 60;
+    endwait = time(NULL) + stop_sec;
+    test_sec = time(NULL) +1;
 	/*
 	 * processing loop
 	 */
-	while( !signal_recieved )
-	{
+	//while( !signal_recieved )
+    while(time(NULL) < endwait)
+	{ 
+
+        char buf[10];
+        FILE *cfq = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq","r");
+        FILE *gfq = fopen("/sys/devices/17000000.gv11b/devfreq/17000000.gv11b/cur_freq","r");
+        FILE *cmd = popen("pidof mortor_control", "r");
+        fscanf(cfq, "%d", &cfreq);
+        fscanf(gfq, "%d", &gfreq);
+        fgets(buf, 10, cmd);
+        pid_t pid_signal = strtoul(buf, NULL, 10);
+        pclose(cmd);
+
 		// capture next image image
 		uchar3* image = NULL;
 
@@ -143,6 +170,10 @@ int main( int argc, char** argv )
 		
 		if( numDetections > 0 )
 		{
+			fscanf(fp2,"%f %f",&lat,&longit);				
+			printf("%f %f\n",lat,longit);
+			printf("=========================================================\n");
+			fprintf(fp ,"%f %f\n",lat,longit);					
 			LogVerbose("%i objects detected\n", numDetections);
 		
 			for( int n=0; n < numDetections; n++ )
@@ -166,12 +197,32 @@ int main( int argc, char** argv )
 			if( !output->IsStreaming() )
 				signal_recieved = true;
 		}
-
 		// print out timing info
 		net->PrintProfilerTimes();
-	}
-	
 
+        if (net->GetProfilerTime(PROFILER_TOTAL).y < 34)
+            kill(pid_signal, SIGUSR2); 
+        cnt++;
+        sum_x += net->GetProfilerTime(PROFILER_TOTAL).x;
+        sum_y += net->GetProfilerTime(PROFILER_TOTAL).y;
+        kill(pid_signal, SIGUSR1);
+
+        if (errno == EPERM)
+            printf("permission denied!\n");
+        else if (errno == ESRCH)
+            printf("process does not exist!\n");
+        else 
+            printf("kill act!\n");
+        
+        fclose(cfq);
+        fclose(gfq);
+    }
+	
+    fprintf(txt,"%f %f %d %d\n", sum_x / cnt, sum_y / cnt, cfreq, gfreq);
+          
+    fclose(txt);
+//        fclose(cfq);
+//        fclose(gfq);
 	/*
 	 * destroy resources
 	 */
@@ -182,6 +233,8 @@ int main( int argc, char** argv )
 	SAFE_DELETE(net);
 
 	LogVerbose("detectnet:  shutdown complete.\n");
+	fclose(fp);
+	fclose(fp2);	
 	return 0;
 }
 
