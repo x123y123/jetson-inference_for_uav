@@ -34,6 +34,7 @@
 	#define IS_HEADLESS() (const char*)NULL
 #endif
 
+#define DVFS
 
 bool signal_recieved = false;
 
@@ -71,7 +72,6 @@ int main( int argc, char** argv )
 
 	FILE *fp = fopen("/home/uav/Desktop/write.txt","a+");	
 	FILE *fp2 = fopen("/home/uav/Desktop/test.txt","r");	
-    FILE *txt = fopen("/home/uav/code/GPS/master_thesis/schedtil_in_60s/detectnet.txt","a+");
 /*    FILE *cfq = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq","r");
     FILE *gfq = fopen("/sys/devices/17000000.gv11b/devfreq/17000000.gv11b/cur_freq","r");
     fscanf(cfq, "%d", &cfreq);
@@ -135,31 +135,37 @@ int main( int argc, char** argv )
     test_sec = time(NULL) +1;
 	/*
 	 * processing loop
-	 */
+     */
+
+    FILE *cfq = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq","r");
+
+
+    FILE *cuda = fopen("cuda.txt","w");
+    FILE *cuda_timelog = fopen("cuda_log.txt", "w");
 	//while( !signal_recieved )
     while(time(NULL) < endwait)
 	{ 
 
-        char buf[10];
-        FILE *cfq = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq","r");
         FILE *gfq = fopen("/sys/devices/17000000.gv11b/devfreq/17000000.gv11b/cur_freq","r");
-        FILE *cmd = popen("pidof mortor_control", "r");
+        fprintf(cuda_timelog, "%ld ", time(NULL)); 
         fscanf(cfq, "%d", &cfreq);
         fscanf(gfq, "%d", &gfreq);
-        fgets(buf, 10, cmd);
+        char buf[50];
+#ifdef DVFS
+        FILE *cmd = popen("pidof mortor_control", "r");
+        fgets(buf, 50, cmd);
         pid_t pid_signal = strtoul(buf, NULL, 10);
-        pclose(cmd);
+#endif
+        // capture next image image
+        uchar3* image = NULL;
 
-		// capture next image image
-		uchar3* image = NULL;
+        if( !input->Capture(&image, 1000) )
+        {
+            // check for EOS
+            if( !input->IsStreaming() )
+                break; 
 
-		if( !input->Capture(&image, 1000) )
-		{
-			// check for EOS
-			if( !input->IsStreaming() )
-				break; 
-
-			LogError("detectnet:  failed to capture video frame\n");
+            LogError("detectnet:  failed to capture video frame\n");
 			continue;
 		}
 
@@ -172,7 +178,7 @@ int main( int argc, char** argv )
 		{
 			fscanf(fp2,"%f %f",&lat,&longit);				
 			printf("%f %f\n",lat,longit);
-			printf("=========================================================\n");
+			printf("================================================================================================================================================================================================================================================================================================================================\n");
 			fprintf(fp ,"%f %f\n",lat,longit);					
 			LogVerbose("%i objects detected\n", numDetections);
 		
@@ -197,32 +203,48 @@ int main( int argc, char** argv )
 			if( !output->IsStreaming() )
 				signal_recieved = true;
 		}
+        if (time(NULL) == test_sec) {
+            fprintf(cuda, "%f %.0f %d\n", 1000/net->GetProfilerTime(PROFILER_TOTAL).y, net->GetNetworkFPS(), gfreq);
+            test_sec = time(NULL) + 1;
+        }
 		// print out timing info
-		net->PrintProfilerTimes();
+		//net->PrintProfilerTimes();
 
-        if (net->GetProfilerTime(PROFILER_TOTAL).y < 34)
-            kill(pid_signal, SIGUSR2); 
         cnt++;
         sum_x += net->GetProfilerTime(PROFILER_TOTAL).x;
         sum_y += net->GetProfilerTime(PROFILER_TOTAL).y;
-        kill(pid_signal, SIGUSR1);
+       
 
-        if (errno == EPERM)
-            printf("permission denied!\n");
-        else if (errno == ESRCH)
-            printf("process does not exist!\n");
-        else 
-            printf("kill act!\n");
-        
-        fclose(cfq);
+        fprintf(cuda_timelog, "%ld\n", time(NULL)); 
         fclose(gfq);
+#ifdef DVFS        
+        pclose(cmd);
+        if (net->GetProfilerTime(PROFILER_TOTAL).y < 17.0f) {
+            kill(pid_signal, SIGUSR1); 
+            if (errno == EPERM)
+               printf("\nSIGUSR1: permission denied!\n");
+            else if (errno == ESRCH)
+                printf("\nSIGUSR1: process does not exist!\n");
+            else     
+                printf("\nSIGUSR1: kill act!\n");
+        }
+        else {
+            kill(pid_signal, SIGUSR2);
+
+            if (errno == EPERM)
+                printf("\nSIGUSR2: permission denied!\n");
+            else if (errno == ESRCH)
+                printf("\nSIGUSR2: process does not exist!\n");
+            else 
+                printf("\nSIGUSR2: kill act!\n");
+        }
+#endif        
     }
 	
-    fprintf(txt,"%f %f %d %d\n", sum_x / cnt, sum_y / cnt, cfreq, gfreq);
-          
-    fclose(txt);
-//        fclose(cfq);
-//        fclose(gfq);
+
+    fclose(cfq);
+    fclose(cuda);
+    fclose(cuda_timelog);
 	/*
 	 * destroy resources
 	 */
