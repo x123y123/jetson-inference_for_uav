@@ -27,6 +27,7 @@
 
 #include <signal.h>
 #include <time.h>
+#include <sched.h>
 
 #ifdef HEADLESS
 	#define IS_HEADLESS() "headless"	// run without display
@@ -35,6 +36,9 @@
 #endif
 
 #define DVFS
+#define setaffinity
+//#define rm_loop
+//#define output_stream
 
 bool signal_recieved = false;
 
@@ -67,15 +71,19 @@ int usage()
 
 int main( int argc, char** argv )
 {
+#ifdef setaffinity
+    int cpu_id = 2;
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu_id, &cpuset);
+
+    sched_setaffinity(0, sizeof(cpuset), &cpuset);
+#endif 
     int cfreq, gfreq, t = 0, cnt = 0;
     int gavailable_freq[15] = {114750000, 204000000, 306000000, 408000000, 510000000, 599250000, 701250000, 803250000, 854250000, 905250000, 956250000, 1007250000, 1058250000, 1109250000};
 
 	FILE *fp = fopen("/home/uav/Desktop/write.txt","a+");	
 	FILE *fp2 = fopen("/home/uav/Desktop/test.txt","r");	
-/*    FILE *cfq = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq","r");
-    FILE *gfq = fopen("/sys/devices/17000000.gv11b/devfreq/17000000.gv11b/cur_freq","r");
-    fscanf(cfq, "%d", &cfreq);
-    fscanf(gfq, "%d", &gfreq);*/
 	float lat , longit, sum_x = 0, sum_y = 0;		
 	/*
 	 * parse command line
@@ -105,7 +113,7 @@ int main( int argc, char** argv )
 		return 1;
 	}
 
-
+#ifdef output_stream
 	/*
 	 * create output stream
 	 */
@@ -113,7 +121,7 @@ int main( int argc, char** argv )
 	
 	if( !output )
 		LogError("detectnet:  failed to create output stream\n");	
-	
+#endif    
 
 	/*
 	 * create detection network
@@ -128,7 +136,7 @@ int main( int argc, char** argv )
 
 	// parse overlay flags
 	const uint32_t overlayFlags = detectNet::OverlayFlagsFromStr(cmdLine.GetString("overlay", "box,labels,conf"));
-
+    int frame = 0;                      //calculate number of frames          
     time_t endwait, test_sec;
     time_t stop_sec = 60;
     endwait = time(NULL) + stop_sec;
@@ -142,16 +150,18 @@ int main( int argc, char** argv )
 
     FILE *cuda = fopen("cuda.txt","w");
     FILE *cuda_timelog = fopen("cuda_log.txt", "w");
+#ifndef rm_loop
 	//while( !signal_recieved )
     while(time(NULL) < endwait)
 	{ 
-
+#endif        
+        printf("\nsched in cpu: %d\n", sched_getcpu());
         FILE *gfq = fopen("/sys/devices/17000000.gv11b/devfreq/17000000.gv11b/cur_freq","r");
         fprintf(cuda_timelog, "%ld ", time(NULL)); 
         fscanf(cfq, "%d", &cfreq);
         fscanf(gfq, "%d", &gfreq);
-        char buf[50];
 #ifdef DVFS
+        char buf[50];
         FILE *cmd = popen("pidof mortor_control", "r");
         fgets(buf, 50, cmd);
         pid_t pid_signal = strtoul(buf, NULL, 10);
@@ -160,19 +170,23 @@ int main( int argc, char** argv )
         uchar3* image = NULL;
 
         if( !input->Capture(&image, 1000) )
-        {
+        {  
+#ifndef rm_loop
             // check for EOS
             if( !input->IsStreaming() )
                 break; 
 
             LogError("detectnet:  failed to capture video frame\n");
 			continue;
+#endif            
 		}
+        frame++;
 
 		// detect objects in the frame
 		detectNet::Detection* detections = NULL;
 	
 		const int numDetections = net->Detect(image, input->GetWidth(), input->GetHeight(), &detections, overlayFlags);
+        float score = 0.0f;
 		
 		if( numDetections > 0 )
 		{
@@ -186,9 +200,10 @@ int main( int argc, char** argv )
 			{
 				LogVerbose("detected obj %i  class #%u (%s)  confidence=%f\n", n, detections[n].ClassID, net->GetClassDesc(detections[n].ClassID), detections[n].Confidence);
 				LogVerbose("bounding box %i  (%f, %f)  (%f, %f)  w=%f  h=%f\n", n, detections[n].Left, detections[n].Top, detections[n].Right, detections[n].Bottom, detections[n].Width(), detections[n].Height()); 
+                score = detections[n].Confidence;
 			}
 		}	
-
+#ifdef output_stream
 		// render outputs
 		if( output != NULL )
 		{
@@ -204,11 +219,12 @@ int main( int argc, char** argv )
 				signal_recieved = true;
 		}
         if (time(NULL) == test_sec) {
-            fprintf(cuda, "%f %.0f %d\n", 1000/net->GetProfilerTime(PROFILER_TOTAL).y, net->GetNetworkFPS(), gfreq);
+            fprintf(cuda, "%f %.0f %d %f\n", 1000/net->GetProfilerTime(PROFILER_TOTAL).y, net->GetNetworkFPS(), score, gfreq);
             test_sec = time(NULL) + 1;
         }
+#endif
 		// print out timing info
-		//net->PrintProfilerTimes();
+		net->PrintProfilerTimes();
 
         cnt++;
         sum_x += net->GetProfilerTime(PROFILER_TOTAL).x;
@@ -219,7 +235,9 @@ int main( int argc, char** argv )
         fclose(gfq);
 #ifdef DVFS        
         pclose(cmd);
-        if (net->GetProfilerTime(PROFILER_TOTAL).y < 17.0f) {
+        //if (net->GetProfilerTime(PROFILER_TOTAL).y < 17.0f) {     // for 60fps (720p)
+        //if (net->GetProfilerTime(PROFILER_TOTAL).y < 33.0f) {     // for 30fps (1080p)
+        if (net->GetProfilerTime(PROFILER_TOTAL).y < 10.0f) {       
             kill(pid_signal, SIGUSR1); 
             if (errno == EPERM)
                printf("\nSIGUSR1: permission denied!\n");
@@ -239,9 +257,9 @@ int main( int argc, char** argv )
                 printf("\nSIGUSR2: kill act!\n");
         }
 #endif        
+#ifndef rm_loop    
     }
-	
-
+#endif
     fclose(cfq);
     fclose(cuda);
     fclose(cuda_timelog);
@@ -251,12 +269,15 @@ int main( int argc, char** argv )
 	LogVerbose("detectnet:  shutting down...\n");
 	
 	SAFE_DELETE(input);
-	SAFE_DELETE(output);
-	SAFE_DELETE(net);
+#ifdef output_stream	
+    SAFE_DELETE(output);
+#endif	
+    SAFE_DELETE(net);
 
 	LogVerbose("detectnet:  shutdown complete.\n");
 	fclose(fp);
 	fclose(fp2);	
+    printf("package: %d\n", frame);
 	return 0;
 }
 
